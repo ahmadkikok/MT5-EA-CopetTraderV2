@@ -190,7 +190,7 @@ bool CSmcManager::Init(const string symbol, const ENUM_TIMEFRAMES timeframe,
 
 //--- 10. Confluence (全モジュール参照)
    m_confluence = new CSmcConfluence();
-   if(!m_confluence.Init(m_symbol, m_timeframe, enableDraw))
+   if(!m_confluence.Init(m_symbol, m_timeframe, false))  // draw=false: SIGNAL label handled by EA comment
       return false;
    m_confluence.SetStructure(m_structure);
    m_confluence.SetOrderBlock(m_ob);

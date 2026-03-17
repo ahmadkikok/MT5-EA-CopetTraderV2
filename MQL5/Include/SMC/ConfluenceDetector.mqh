@@ -131,7 +131,7 @@ bool CSmcConfluence::Init(const string symbol, const ENUM_TIMEFRAMES timeframe,
   {
    if(!CSmcBase::Init(symbol, timeframe, enableDraw))
       return false;
-   m_prefix = "SMC_CONF_";
+   m_prefix = "SMC_CONF_" + IntegerToString((int)timeframe) + "_";
    return true;
   }
 
@@ -140,6 +140,13 @@ bool CSmcConfluence::Update()
   {
    if(!m_initialized)
       return false;
+
+   // Gate to new bar — confluence factors don't change mid-bar
+   datetime currentBar = iTime(m_symbol, m_timeframe, 0);
+   static datetime s_lastBar = 0;
+   if(currentBar == s_lastBar)
+      return true;
+   s_lastBar = currentBar;
 
    m_buyZone.Init();
    m_sellZone.Init();

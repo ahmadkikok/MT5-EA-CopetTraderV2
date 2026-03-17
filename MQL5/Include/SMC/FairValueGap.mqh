@@ -406,8 +406,7 @@ void CSmcFairValueGap::UpdateStates()
       if(!m_bullishFVGs[i].isValid)
          continue;
 
-      // KEY: update age for scoring only — FVGs only die when price fills them
-      m_bullishFVGs[i].age = iBarShift(m_symbol, m_timeframe, m_bullishFVGs[i].formationTime);
+      // age updated on new bar only — not per tick
 
       //--- 価格がFVGゾーン内に入った
       if(currentBid <= m_bullishFVGs[i].topPrice &&
@@ -439,9 +438,6 @@ void CSmcFairValueGap::UpdateStates()
      {
       if(!m_bearishFVGs[i].isValid)
          continue;
-
-      // KEY: update age for scoring only — FVGs only die when price fills them
-      m_bearishFVGs[i].age = iBarShift(m_symbol, m_timeframe, m_bearishFVGs[i].formationTime);
 
       if(currentBid >= m_bearishFVGs[i].bottomPrice &&
          currentBid <= m_bearishFVGs[i].topPrice)

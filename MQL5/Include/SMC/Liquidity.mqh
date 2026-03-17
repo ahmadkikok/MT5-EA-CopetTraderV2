@@ -108,7 +108,7 @@ bool CSmcLiquidity::Init(const string symbol, const ENUM_TIMEFRAMES timeframe,
    if(!CSmcBase::Init(symbol, timeframe, enableDraw))
       return false;
 
-   m_prefix         = "SMC_LIQ_";
+   m_prefix         = "SMC_LIQ_" + IntegerToString((int)timeframe) + "_";
    m_tolerancePips  = tolerancePips;
 
    if(swingPoints != NULL)
@@ -140,6 +140,13 @@ bool CSmcLiquidity::Update()
 
    if(m_ownSwing)
       m_swingPoints.Update();
+
+   // Only full rescan on new bar — liquidity levels don't change mid-bar
+   datetime currentBar = iTime(m_symbol, m_timeframe, 0);
+   static datetime s_lastBar = 0;
+   if(currentBar == s_lastBar)
+      return true;
+   s_lastBar = currentBar;
 
    m_levelCount = 0;
 

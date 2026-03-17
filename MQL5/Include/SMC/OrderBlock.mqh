@@ -102,7 +102,7 @@ CSmcOrderBlock::CSmcOrderBlock()
    , m_maxOBs(20)
    , m_maxAge(150)
    , m_maxDrawOBs(5)
-   , m_minStrength(1.5)
+   , m_minStrength(1.2)      // relaxed for M1 — 1.5 was too strict
    , m_bullishCount(0)
    , m_bearishCount(0)
    , m_initialScanDone(false)
@@ -436,7 +436,9 @@ bool CSmcOrderBlock::IsImpulsiveMove(const int startBar, const int direction)
         }
      }
 
-   return (consecutive >= 1 && totalMove > avgBody * 2.0);
+   // Relaxed: only need 1 impulsive candle with total move > 1.2x avg body
+   // (was 2.0x — too strict for M1 where candles are small and choppy)
+   return (consecutive >= 1 && totalMove > avgBody * 1.2);
   }
 
 //+------------------------------------------------------------------+
@@ -452,9 +454,7 @@ void CSmcOrderBlock::UpdateStates()
       if(!m_bullishOBs[i].isValid)
          continue;
 
-      // KEY: update age for scoring only — do NOT expire by age alone
-      // OBs only become invalid when price actually breaks through them
-      m_bullishOBs[i].age = iBarShift(m_symbol, m_timeframe, m_bullishOBs[i].formationTime);
+      // age updated on new bar only (in DetectOrderBlocks) — not per tick
 
       //--- 価格がOBゾーン内に入った場合
       if(currentBid <= m_bullishOBs[i].topPrice && currentBid >= m_bullishOBs[i].bottomPrice)
@@ -479,9 +479,6 @@ void CSmcOrderBlock::UpdateStates()
      {
       if(!m_bearishOBs[i].isValid)
          continue;
-
-      // KEY: update age for scoring only — do NOT expire by age alone
-      m_bearishOBs[i].age = iBarShift(m_symbol, m_timeframe, m_bearishOBs[i].formationTime);
 
       if(currentBid >= m_bearishOBs[i].bottomPrice && currentBid <= m_bearishOBs[i].topPrice)
         {

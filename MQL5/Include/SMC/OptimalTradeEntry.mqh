@@ -82,7 +82,7 @@ bool CSmcOptimalTradeEntry::Init(const string symbol, const ENUM_TIMEFRAMES time
    if(!CSmcBase::Init(symbol, timeframe, enableDraw))
       return false;
 
-   m_prefix = "SMC_OTE_";
+   m_prefix = "SMC_OTE_" + IntegerToString((int)timeframe) + "_";
 
    if(swingPoints != NULL)
      { m_swingPoints = swingPoints; m_ownSwing = false; }
@@ -105,10 +105,16 @@ bool CSmcOptimalTradeEntry::Update()
    if(m_ownSwing)
       m_swingPoints.Update();
 
-   Calculate();
-
-   if(m_enableDraw && m_currentOTE.isValid)
-      DrawOTE();
+   // Gate to new bar — OTE zone only changes when swings update
+   datetime currentBar = iTime(m_symbol, m_timeframe, 0);
+   static datetime s_lastBar = 0;
+   if(currentBar != s_lastBar)
+     {
+      s_lastBar = currentBar;
+      Calculate();
+      if(m_enableDraw && m_currentOTE.isValid)
+         DrawOTE();
+     }
 
    return true;
   }

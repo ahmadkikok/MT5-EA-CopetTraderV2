@@ -117,35 +117,45 @@ bool IsNearATL(double threshPts, ENUM_TIMEFRAMES tf)
 }*/
 
 //+------------------------------------------------------------------+
-//| MTF Trend check using xxvw                                       |
+//| MTF Trend check                                                  |
+//| Primary gate: M15 bias must have direction                       |
+//| M5 struct: opposing trend is ALLOWED (it's a pullback into OB)  |
+//| M1 entry: block only if very fresh opposing BOS (running away)  |
 //+------------------------------------------------------------------+
 bool IsTrendAligned(ENUM_ORDER_TYPE type)
 {
-   ENUM_SMC_TREND bias   = g_smcBias.GetTrend();
-   ENUM_SMC_TREND strct  = g_smcStruct.GetTrend();
-   ENUM_SMC_TREND entry  = g_smcEntry.GetTrend();
-
-   // Bias MUST have direction
-   if(bias == SMC_TREND_RANGING) return false;
-
    bool wantBull = (type == ORDER_TYPE_BUY);
 
-   // Bias must agree
-   if(wantBull  && bias != SMC_TREND_BULLISH) return false;
-   if(!wantBull && bias != SMC_TREND_BEARISH) return false;
+   //--- Step 1: Bias (M15) — primary gate, must have clear direction
+   ENUM_SMC_TREND biasTrend = g_smcBias.GetTrend();
 
-   // At least 1 other TF must agree
-   int agree = 0;
-   if(wantBull  && strct == SMC_TREND_BULLISH) agree++;
-   if(!wantBull && strct == SMC_TREND_BEARISH) agree++;
-   if(wantBull  && entry == SMC_TREND_BULLISH) agree++;
-   if(!wantBull && entry == SMC_TREND_BEARISH) agree++;
+   if(biasTrend == SMC_TREND_RANGING)
+   {
+      // Bias ranging = consolidation. Allow entry if Entry TF has clear direction.
+      // This covers choppy M15 periods where M1 is still trending.
+      ENUM_SMC_TREND entryTrend = g_smcEntry.GetTrend();
+      if(wantBull  && entryTrend != SMC_TREND_BULLISH) return false;
+      if(!wantBull && entryTrend != SMC_TREND_BEARISH) return false;
+   }
+   else
+   {
+      if(wantBull  && biasTrend != SMC_TREND_BULLISH) return false;
+      if(!wantBull && biasTrend != SMC_TREND_BEARISH) return false;
+   }
 
-   // Don't allow opposite direction on any TF
-   if(wantBull  && entry == SMC_TREND_BEARISH) return false;
-   if(!wantBull && entry == SMC_TREND_BULLISH) return false;
+   // NOTE: M5 struct check removed intentionally.
+   // Opposing M5 structure = pullback phase = exactly when price enters OB.
+   // Blocking on M5 bearish during M15 bullish prevents all pullback entries.
 
-   return (agree >= 1);
+   //--- Step 2: Entry TF (M1) — block only if very fresh opposing BOS
+   SmcStructureBreak entryBOS;
+   if(g_smcEntry.Structure().GetLastBOS(entryBOS) && entryBOS.barIndex <= 3)
+   {
+      if(wantBull  && !entryBOS.isBullish) return false;
+      if(!wantBull &&  entryBOS.isBullish) return false;
+   }
+
+   return true;
 }
 
 //+------------------------------------------------------------------+
@@ -214,6 +224,23 @@ void UpdateComment(string extra)
    ENUM_SMC_TREND structTrend = g_smcStruct.GetTrend();
    ENUM_SMC_TREND entryTrend  = g_smcEntry.GetTrend();
 
+   // BOS/CHoCH info for display
+   SmcStructureBreak biasBOS, biasCHoCH, structBOS, entryBOS;
+   string biasEvent = "--", structEvent = "--", entryEvent = "--";
+
+   if(g_smcBias.Structure().GetLastBOS(biasBOS))
+      biasEvent = StringFormat("%s BOS", biasBOS.isBullish ? "▲" : "▼");
+   if(g_smcBias.Structure().GetLastCHoCH(biasCHoCH))
+   {
+      // Show CHoCH if more recent than BOS
+      if(!g_smcBias.Structure().GetLastBOS(biasBOS) || biasCHoCH.time > biasBOS.time)
+         biasEvent = StringFormat("%s CHoCH", biasCHoCH.isBullish ? "▲" : "▼");
+   }
+   if(g_smcStruct.Structure().GetLastBOS(structBOS))
+      structEvent = StringFormat("%s BOS", structBOS.isBullish ? "▲" : "▼");
+   if(g_smcEntry.Structure().GetLastBOS(entryBOS))
+      entryEvent = StringFormat("%s BOS[%d]", entryBOS.isBullish ? "▲" : "▼", entryBOS.barIndex);
+
    string biasStr  = (biasTrend  == SMC_TREND_BULLISH) ? "🟢 BULL" :
                      (biasTrend  == SMC_TREND_BEARISH) ? "🔴 BEAR" : "⬜ RANGE";
    string structStr= (structTrend == SMC_TREND_BULLISH) ? "🟢 BULL" :
@@ -232,6 +259,27 @@ void UpdateComment(string extra)
       obBearStr = StringFormat("%.2f-%.2f [%s]", nearBear.bottomPrice, nearBear.topPrice,
                                nearBear.IsFresh() ? "F" : "T");
 
+   // OTE Zone info
+   string oteStr = "--";
+   SmcOTEZone ote;
+   if(g_smcEntry.OTE().GetOTEZone(ote))
+   {
+      bool inOTE = g_smcEntry.OTE().IsInOTEZone(bid);
+      oteStr = StringFormat("%.2f-%.2f %s",
+               g_smcEntry.OTE().GetFib786(),
+               g_smcEntry.OTE().GetFib618(),
+               inOTE ? "✅" : "⬜");
+   }
+
+   // Liquidity info — nearest unswept levels
+   string liqHighStr = "--", liqLowStr = "--";
+   SmcLiquidityLevel liqH, liqL;
+   if(g_smcEntry.Liquidity().GetNearestEqualHigh(bid, liqH) && !liqH.isSweep)
+      liqHighStr = StringFormat("%.2f (%s)", liqH.price,
+                   liqH.type == LIQ_POOL_HIGH ? "POOL" : "EQH");
+   if(g_smcEntry.Liquidity().GetNearestEqualLow(bid, liqL) && !liqL.isSweep)
+      liqLowStr = StringFormat("%.2f (%s)", liqL.price,
+                  liqL.type == LIQ_POOL_LOW ? "POOL" : "EQL");
    // PD Zone
    double pdPct = g_smcEntry.PD().GetZonePercent(bid);
    string pdStr  = StringFormat("%.0f%% (%s)", pdPct,
@@ -246,19 +294,26 @@ void UpdateComment(string extra)
    string pdLvlStatus   = GetPDStatus();
    string newsStatus    = GetNewsStatus();
 
-   if(TimeCurrent() - LastPerfUpdate > 10)
+   // Skip performance calc in backtest/optimization (expensive HistorySelect)
+   bool inTester = (MQLInfoInteger(MQL_TESTER) || MQLInfoInteger(MQL_OPTIMIZATION));
+   if(!inTester && TimeCurrent() - LastPerfUpdate > 60)
       { CachedPerf = CalculatePerformance(); LastPerfUpdate = TimeCurrent(); }
 
    Comment(StringFormat(
-      "═══ Market Structure (xxvw) ═══\n"
-      "Bias   (%s): %s\n"
-      "Struct (%s): %s\n"
-      "Entry  (%s): %s\n"
+      "═══ Market Structure (BOS/CHoCH) ═══\n"
+      "Bias   (%s): %s | %s\n"
+      "Struct (%s): %s | %s\n"
+      "Entry  (%s): %s | %s\n"
       "\n"
-      "═══ Order Blocks ═══\n"
+      "═══ Zones ═══\n"
       "Bull OB: %s\n"
       "Bear OB: %s\n"
+      "OTE:     %s\n"
       "PD Zone: %s\n"
+      "\n"
+      "═══ Liquidity ═══\n"
+      "EQH: %s\n"
+      "EQL: %s\n"
       "\n"
       "═══ Protection Status ═══\n"
       "%s\n%s\n%s\n%s\n"
@@ -270,10 +325,11 @@ void UpdateComment(string extra)
       "Win: %d | Loss: %d | P/L: $%.2f\n"
       "Daily: %.1f%% | Week: %.1f%% | Month: %.1f%%\n"
       "\n%s\n%s",
-      EnumToString(InpBiasTF),   biasStr,
-      EnumToString(InpStructTF), structStr,
-      EnumToString(Period()),    entryStr,
-      obBullStr, obBearStr, pdStr,
+      EnumToString(InpBiasTF),   biasStr,  biasEvent,
+      EnumToString(InpStructTF), structStr, structEvent,
+      EnumToString(Period()),    entryStr,  entryEvent,
+      obBullStr, obBearStr, oteStr, pdStr,
+      liqHighStr, liqLowStr,
       ddStatus, floatStatus, dailyStatus, gridStatus,
       spread, newsStatus,
       CachedPerf.totalWin, CachedPerf.totalLoss, CachedPerf.totalProfit,

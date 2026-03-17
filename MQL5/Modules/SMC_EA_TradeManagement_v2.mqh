@@ -55,6 +55,21 @@ extern bool   g_BlockOversold;
 extern double g_BlockRangePercent;
 extern int    g_RangeLookback;
 extern int    g_RSIPeriode;
+extern bool   g_RequireBearishM1Sell;
+extern bool   g_RequireBullishM1Buy;
+
+// Persistent RSI handle — created once in InitRSI(), reused every tick
+static int g_rsiHandle = INVALID_HANDLE;
+
+void InitRSI()
+{
+   if(g_rsiHandle != INVALID_HANDLE) IndicatorRelease(g_rsiHandle);
+   g_rsiHandle = iRSI(_Symbol, PERIOD_CURRENT, g_RSIPeriode, PRICE_CLOSE);
+}
+void CleanupRSI()
+{
+   if(g_rsiHandle != INVALID_HANDLE) { IndicatorRelease(g_rsiHandle); g_rsiHandle = INVALID_HANDLE; }
+}
 
 //+------------------------------------------------------------------+
 //| Helper Set BreakEven (lock profit in $) untuk semua posisi       |
@@ -261,6 +276,17 @@ void Manage_Position()
             }
          }
 
+         if(posType == POSITION_TYPE_BUY)
+         {
+            double posTP = PositionGetDouble(POSITION_TP);
+            if(posTP > 0.0)
+            {
+               DebugPrint(StringFormat("[TradeManagement] Skip FixedTP BUY #%I64u: RR TP=%.2f set",
+                           currentTicket, posTP));
+               continue;
+            }
+         }
+         
          int size = ArraySize(ticketsToClose);
          ArrayResize(ticketsToClose, size + 1);
          ticketsToClose[size] = currentTicket;
@@ -630,44 +656,49 @@ string GetFloatingLossStatus()
 //+------------------------------------------------------------------+
 bool IsEntryValid(ENUM_ORDER_TYPE orderType)
 {
-   // ── Sell: M1 bearish confirmation (hardcoded, always active) ──
-   if(orderType == ORDER_TYPE_SELL)
+   // ── Sell: M1 bearish confirmation ──
+   if(orderType == ORDER_TYPE_SELL && g_RequireBearishM1Sell)
    {
       MqlRates m1[];
       ArraySetAsSeries(m1, true);
       if(CopyRates(_Symbol, PERIOD_CURRENT, 1, 1, m1) >= 1)
       {
          if(m1[0].close >= m1[0].open)
-         {
-            DebugPrint(StringFormat("⛔ Sell timing: M1 bullish (o=%.2f c=%.2f), waiting reject",
-                       m1[0].open, m1[0].close));
-            return false;
-         }
-         DebugPrint("✅ Sell timing: M1 bearish confirmed");
+            { DebugPrint(StringFormat("⛔ M1 bearish wait (o=%.2f c=%.2f)", m1[0].open, m1[0].close)); return false; }
       }
    }
 
-   // ── RSI Check (hardcoded, always active) ──────────────────────
-   int rsiHandle = iRSI(_Symbol, PERIOD_CURRENT, g_RSIPeriode, PRICE_CLOSE);
-   double rsiBuffer[];
-   ArraySetAsSeries(rsiBuffer, true);
-   CopyBuffer(rsiHandle, 0, 0, 1, rsiBuffer);
-   double rsi = rsiBuffer[0];
-   IndicatorRelease(rsiHandle);
-
-   if(orderType == ORDER_TYPE_BUY && g_BlockOverbought && rsi > 70)
+   // ── BUY: M1 bullish confirmation ──
+   if(orderType == ORDER_TYPE_BUY && g_RequireBullishM1Buy)
    {
-      DebugPrint(StringFormat("⛔ Entry blocked: BUY at RSI %.1f (overbought)", rsi));
-      return false;
+      MqlRates m1[];
+      ArraySetAsSeries(m1, true);
+      if(CopyRates(_Symbol, PERIOD_CURRENT, 1, 1, m1) >= 1)
+      {
+         if(m1[0].close <= m1[0].open)
+            { DebugPrint(StringFormat("⛔ M1 bullish wait (o=%.2f c=%.2f)", m1[0].open, m1[0].close)); return false; }
+      }
    }
 
-   if(orderType == ORDER_TYPE_SELL && g_BlockOversold && rsi < 30)
+   // ── RSI Check ──
+   if(g_BlockOverbought || g_BlockOversold)
    {
-      DebugPrint(StringFormat("⛔ Entry blocked: SELL at RSI %.1f (oversold)", rsi));
-      return false;
+      if(g_rsiHandle == INVALID_HANDLE) InitRSI();
+      double rsiBuffer[];
+      ArraySetAsSeries(rsiBuffer, true);
+      if(CopyBuffer(g_rsiHandle, 0, 0, 1, rsiBuffer) >= 1)
+      {
+         double rsi = rsiBuffer[0];
+         if(orderType == ORDER_TYPE_BUY  && g_BlockOverbought && rsi > 70)
+            { DebugPrint(StringFormat("⛔ RSI BUY block: %.1f > 70", rsi)); return false; }
+         if(orderType == ORDER_TYPE_BUY  && g_BlockOversold  && rsi < 30)
+            { DebugPrint(StringFormat("⛔ RSI BUY block: %.1f < 30", rsi)); return false; }
+         if(orderType == ORDER_TYPE_SELL && g_BlockOverbought && rsi > 70)
+            { DebugPrint(StringFormat("⛔ RSI SELL block: %.1f > 70", rsi)); return false; }
+      }
    }
 
-   // ── Range Position Check (only if ValidateEntry = true) ───────
+   // ── Range Position Check (only if ValidateEntry = true) ──
    if(!g_ValidateEntry) return true;
 
    double highestHigh = 0, lowestLow = 999999;
@@ -676,27 +707,19 @@ bool IsEntryValid(ENUM_ORDER_TYPE orderType)
       double h = iHigh(_Symbol, Period(), i);
       double l = iLow(_Symbol, Period(), i);
       if(h > highestHigh) highestHigh = h;
-      if(l < lowestLow) lowestLow = l;
+      if(l < lowestLow)   lowestLow   = l;
    }
 
    double range = highestHigh - lowestLow;
    if(range <= 0) return true;
 
-   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double currentPrice  = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double pricePosition = (currentPrice - lowestLow) / range * 100;
 
    if(orderType == ORDER_TYPE_BUY && pricePosition >= g_BlockRangePercent)
-   {
-      DebugPrint(StringFormat("⛔ Entry blocked: BUY at top %.0f%% of range (>%.0f%%)",
-                     pricePosition, g_BlockRangePercent));
-      return false;
-   }
-
+      { DebugPrint(StringFormat("⛔ Range BUY block: price at %.0f%% > %.0f%%", pricePosition, g_BlockRangePercent)); return false; }
    if(orderType == ORDER_TYPE_SELL && pricePosition <= (100 - g_BlockRangePercent))
-   {
-      DebugPrint(StringFormat("⛔ Entry blocked: SELL at bottom %.0f%% of range", pricePosition));
-      return false;
-   }
+      { DebugPrint(StringFormat("⛔ Range SELL block: price at %.0f%%", pricePosition)); return false; }
 
    return true;
 }

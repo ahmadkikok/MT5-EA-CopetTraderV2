@@ -26,6 +26,14 @@ extern bool   g_EnableSellRR;
 extern double g_SellRR;
 extern double g_SellSLMin;
 extern double g_SellSLMax;
+extern bool   g_EnableBuyRR;
+extern double g_BuyRR;
+extern double g_BuySLMin;
+extern double g_BuySLMax;
+extern bool   g_BuyRiskPercent;
+extern double g_BuyRiskPct;
+extern bool   g_SellRiskPercent;
+extern double g_SellRiskPct;
 
 //void ErrorPrint(string msg);
 //void SysPrint(string msg);
@@ -104,11 +112,39 @@ bool SendOrderWithFallback(MqlTradeRequest &request, MqlTradeResult &result)
 }
 
 //+------------------------------------------------------------------+
+//| Lot sizing dari risk % balance                                   |
+//| riskPct = 1.0 berarti 1% dari balance                           |
+//| slPoints = jarak SL dalam points (e.g. 50.0)                    |
+//+------------------------------------------------------------------+
+double CalcLotByRiskPercent(double riskPct, double slPoints)
+{
+   if(slPoints <= 0) return SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+
+   double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskAmount = balance * riskPct / 100.0;
+   double tickValue  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double pointValue = tickValue / (tickSize / _Point);  // value per 1 point per 1 lot
+
+   if(pointValue <= 0) return SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+
+   double rawLot  = riskAmount / (slPoints * pointValue);
+   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+   // Round to nearest step
+   rawLot = MathFloor(rawLot / stepLot) * stepLot;
+   rawLot = MathMax(minLot, MathMin(maxLot, rawLot));
+
+   SysPrint(StringFormat("📐 Risk%%: %.2f%% of $%.2f = $%.2f | SL=%.1f pts | Lot=%.2f",
+            riskPct, balance, riskAmount, slPoints, rawLot));
+   return rawLot;
+}
+
+//+------------------------------------------------------------------+
 //| OpenPosition with OB-based SL                                    |
 //+------------------------------------------------------------------+
-// FIX: OpenPosition sekarang menerima OB aktif sebagai parameter
-// Sebelumnya SL pakai g_usedOBTimes (OB trade lalu / kosong saat pertama kali)
-// Sekarang SL langsung pakai ob.bottomPrice (BUY) atau ob.topPrice (SELL) = proper ICT placement
 bool OpenPosition(ENUM_ORDER_TYPE type, double lot, const SmcZone &ob)
 {
    if(type == ORDER_TYPE_BUY)
@@ -143,11 +179,8 @@ bool OpenPosition(ENUM_ORDER_TYPE type, double lot, const SmcZone &ob)
    request.magic     = g_magicNumber;
    request.type_filling = ORDER_FILLING_RETURN;
 
-   // === OB-based SL Calculation (FIXED) ===
-   // FIX: SL ditempatkan di luar OB zone:
-   //   BUY  → SL = ob.bottomPrice  - buffer  (di bawah demand zone)
-   //   SELL → SL = ob.topPrice + buffer  (di atas supply zone)
-   // Buffer = g_SLFixedTP * ATR untuk menghindari fake-out
+   // === SL Calculation ===
+   // RR mode always needs SL. Fixed mode only sets SL if OB-SL is enabled.
    bool applySL = false;
    if(g_stopLossOB)
    {
@@ -155,85 +188,82 @@ bool OpenPosition(ENUM_ORDER_TYPE type, double lot, const SmcZone &ob)
          (type == ORDER_TYPE_SELL && g_ApplyOBSL_Sell))
          applySL = true;
    }
+   if(type == ORDER_TYPE_BUY  && g_EnableBuyRR)  applySL = true;
+   if(type == ORDER_TYPE_SELL && g_EnableSellRR)  applySL = true;
 
-   if(applySL)
+   if(applySL && ob.formationTime > 0)
    {
-      // Validasi OB: ob.formationTime harus valid
-      if(ob.formationTime == 0)
+      double atr    = GetATR(1);
+      double buffer = atr * g_SLFixedTP;
+      if(buffer <= 0) buffer = ob.topPrice - ob.bottomPrice;
+
+      double slPrice = 0.0;
+      if(type == ORDER_TYPE_BUY)
       {
-         SysPrint("⚠️ OB-SL: ob.formationTime invalid, SL = 0 (no SL set)");
-         request.sl = 0.0;
+         slPrice = ob.bottomPrice - buffer;
+         if(slPrice >= request.price) slPrice = request.price - buffer;
       }
       else
       {
-         // Buffer = SLFixedTP * ATR (pakai ATR entry timeframe)
-         double atr    = GetATR(1);  // last closed bar ATR
-         double buffer = atr * g_SLFixedTP;
-         if(buffer <= 0) buffer = ob.topPrice - ob.bottomPrice;  // fallback = OB range
-
-         double slPrice = 0.0;
-         if(type == ORDER_TYPE_BUY)
-         {
-            // SL di bawah OB low
-            slPrice = ob.bottomPrice - buffer;
-            
-            // Safety: SL harus di bawah entry price
-            if(slPrice >= request.price)
-            {
-               SysPrint(StringFormat("⚠️ OB-SL BUY: sl=%.2f >= entry=%.2f, set sl=entry-buffer", slPrice, request.price));
-               slPrice = request.price - buffer;
-            }
-         }
-         else
-         {
-            // SL di atas OB high
-            slPrice = ob.topPrice + buffer;
-            
-            // Safety: SL harus di atas entry price
-            if(slPrice <= request.price)
-            {
-               SysPrint(StringFormat("⚠️ OB-SL SELL: sl=%.2f <= entry=%.2f, set sl=entry+buffer", slPrice, request.price));
-               slPrice = request.price + buffer;
-            }
-         }
-
-         request.sl = NormalizeDouble(slPrice, _Digits);
-
-         double slPips = MathAbs(request.price - request.sl) / _Point;
-         SysPrint(StringFormat("📍 OB-SL %s: entry=%.2f | OB[%.2f-%.2f] | buffer=%.2f | SL=%.2f (%.0f pts)",
-                     (type==ORDER_TYPE_BUY?"BUY":"SELL"),
-                     request.price, ob.bottomPrice, ob.topPrice, buffer,
-                     request.sl, slPips));
+         slPrice = ob.topPrice + buffer;
+         if(slPrice <= request.price) slPrice = request.price + buffer;
       }
+      request.sl = NormalizeDouble(slPrice, _Digits);
+      double slPts = MathAbs(request.price - request.sl) / _Point;
+      SysPrint(StringFormat("📍 OB-SL %s: entry=%.2f OB[%.2f-%.2f] SL=%.2f (%.0f pts)",
+               (type==ORDER_TYPE_BUY?"BUY":"SELL"),
+               request.price, ob.bottomPrice, ob.topPrice, request.sl, slPts));
    }
    else
    {
       request.sl = 0.0;
    }
 
-   // === SELL SL Guard: min/max distance check ===
-   // Skip trade kalau SL terlalu dekat (noise) atau terlalu jauh (news spike)
+   // === BUY SL Guard ===
+   if(type == ORDER_TYPE_BUY && request.sl > 0.0 && g_EnableBuyRR)
+   {
+      double slDist = MathAbs(request.sl - request.price) / _Point;
+      if(g_BuySLMin > 0 && slDist < g_BuySLMin)
+         { SysPrint(StringFormat("[SLGuard] ⛔ BUY SKIP: SL %.1f pts < min %.1f", slDist, g_BuySLMin)); return false; }
+      if(g_BuySLMax > 0 && slDist > g_BuySLMax)
+         { SysPrint(StringFormat("[SLGuard] ⛔ BUY SKIP: SL %.1f pts > max %.1f", slDist, g_BuySLMax)); return false; }
+   }
+
+   // === SELL SL Guard ===
    if(type == ORDER_TYPE_SELL && request.sl > 0.0)
    {
       double slDist = MathAbs(request.sl - request.price) / _Point;
       if(slDist < g_SellSLMin)
-      {
-         SysPrint(StringFormat("[SLGuard] ⛔ SELL SKIP: SL too close (%.1f pts < min %.1f pts)", slDist, g_SellSLMin));
-         return false;
-      }
+         { SysPrint(StringFormat("[SLGuard] ⛔ SELL SKIP: SL %.1f pts < min %.1f", slDist, g_SellSLMin)); return false; }
       if(g_SellSLMax > 0 && slDist > g_SellSLMax)
-      {
-         SysPrint(StringFormat("[SLGuard] ⛔ SELL SKIP: SL too far (%.1f pts > max %.1f pts)", slDist, g_SellSLMax));
-         return false;
-      }
+         { SysPrint(StringFormat("[SLGuard] ⛔ SELL SKIP: SL %.1f pts > max %.1f", slDist, g_SellSLMax)); return false; }
    }
+
+   // === Risk % Lot Sizing (overrides fixed lot if enabled + SL known) ===
+   if(type == ORDER_TYPE_BUY && g_BuyRiskPercent && request.sl > 0.0)
+      request.volume = CalcLotByRiskPercent(g_BuyRiskPct, MathAbs(request.price - request.sl) / _Point);
+   else if(type == ORDER_TYPE_SELL && g_SellRiskPercent && request.sl > 0.0)
+      request.volume = CalcLotByRiskPercent(g_SellRiskPct, MathAbs(request.price - request.sl) / _Point);
 
    request.tp = 0.0;
 
-   // === RR-based TP untuk SELL ===
+   // === BUY RR-based TP ===
+   if(type == ORDER_TYPE_BUY && g_EnableBuyRR && request.sl > 0.0)
+   {
+      double slDist  = request.price - request.sl;
+      double tpPrice = request.price + (slDist * g_BuyRR);
+      if(tpPrice > request.price)
+      {
+         request.tp = NormalizeDouble(tpPrice, _Digits);
+         SysPrint(StringFormat("🎯 BUY RR TP: entry=%.2f SL=%.2f RR=%.1f TP=%.2f",
+                  request.price, request.sl, g_BuyRR, request.tp));
+      }
+   }
+
+   // === SELL RR-based TP ===
    if(type == ORDER_TYPE_SELL && g_EnableSellRR && request.sl > 0.0)
    {
-      double slDist = request.sl - request.price;
+      double slDist  = request.sl - request.price;
       double tpPrice = request.price - (slDist * g_SellRR);
       if(tpPrice < request.price)
       {

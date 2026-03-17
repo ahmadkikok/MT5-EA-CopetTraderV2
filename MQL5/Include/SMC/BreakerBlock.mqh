@@ -95,7 +95,7 @@ bool CSmcBreakerBlock::Init(const string symbol, const ENUM_TIMEFRAMES timeframe
    if(!CSmcBase::Init(symbol, timeframe, enableDraw))
       return false;
 
-   m_prefix = "SMC_BRK_";
+   m_prefix = "SMC_BRK_" + IntegerToString((int)timeframe) + "_";
 
    if(orderBlock != NULL)
      {
@@ -126,6 +126,13 @@ bool CSmcBreakerBlock::Update()
 
    if(m_ownOB)
       m_orderBlock.Update();
+
+   // Gate full scan to new bar only
+   datetime currentBar = iTime(m_symbol, m_timeframe, 0);
+   static datetime s_lastBar = 0;
+   if(currentBar == s_lastBar)
+      return true;
+   s_lastBar = currentBar;
 
    m_breakerCount    = 0;
    m_mitigationCount = 0;
